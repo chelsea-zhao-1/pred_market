@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+
+# Environment Variables & Secrets
+.env
+*.key
+*.pem
+proj1.txt 
+
+# OS
+.DS_Store
+
+# IDE
+.vscode/
