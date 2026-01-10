@@ -17,3 +17,10 @@ proj1.txt
 
 # IDE
 .vscode/
+
+# Output files
+plots/
+data/
+*.png
+*.jpg
+*.jpeg

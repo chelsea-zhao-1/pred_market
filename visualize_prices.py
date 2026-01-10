@@ -1,10 +1,16 @@
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+import os
+
+# Create output directory for plots
+script_dir = os.path.dirname(os.path.abspath(__file__))
+output_dir = os.path.join(script_dir, 'plots')
+os.makedirs(output_dir, exist_ok=True)
 
 # Load the data
-poly_file = 'old proj/polymarket_giants_vs_raiders_ingame_prices.csv'
-kalshi_file = 'old proj/kalshi_giants_vs_raiders_ingame_prices.csv'
+poly_file = 'polymarket_giants_vs_raiders_ingame_prices.csv'
+kalshi_file = 'kalshi_giants_vs_raiders_ingame_prices.csv'
 
 try:
     df_poly = pd.read_csv(poly_file)
@@ -41,7 +47,7 @@ try:
     plt.tight_layout()
     
     # Save the plot
-    output_file = 'price_comparison_plot.png'
+    output_file = os.path.join(output_dir, 'price_comparison_plot.png')
     plt.savefig(output_file)
     print(f"Plot saved to '{output_file}'")
 

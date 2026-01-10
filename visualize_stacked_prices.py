@@ -8,6 +8,10 @@ def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     kalshi_path = os.path.join(script_dir, 'kalshi_giants_vs_raiders_ingame_prices.csv')
     polymarket_path = os.path.join(script_dir, 'polymarket_giants_vs_raiders_ingame_prices.csv')
+    
+    # Create output directory for plots
+    output_dir = os.path.join(script_dir, 'plots')
+    os.makedirs(output_dir, exist_ok=True)
 
     # Load data
     print("Loading data...")
@@ -89,7 +93,7 @@ def main():
     plt.tight_layout()
 
     # Save plot
-    output_file = 'stacked_prices_chart.png'
+    output_file = os.path.join(output_dir, 'stacked_prices_chart.png')
     plt.savefig(output_file)
     print(f"Plot saved to {output_file}")
     
