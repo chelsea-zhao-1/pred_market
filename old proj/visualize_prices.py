@@ -3,8 +3,8 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
 # Load the data
-poly_file = 'polymarket_giants_vs_raiders_ingame_prices.csv'
-kalshi_file = 'kalshi_giants_vs_raiders_ingame_prices.csv'
+poly_file = 'old proj/polymarket_giants_vs_raiders_ingame_prices.csv'
+kalshi_file = 'old proj/kalshi_giants_vs_raiders_ingame_prices.csv'
 
 try:
     df_poly = pd.read_csv(poly_file)

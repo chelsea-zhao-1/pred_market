@@ -30,15 +30,15 @@ class GameConfig:
 
 # --- USER: UPDATE THIS SECTION FOR YOUR GAME ---
 CONFIG = GameConfig(
-    game_name="giants_vs_raiders",
+    game_name="oregon_v_indiana",
     # Times (ISO Format with Timezone)
-    start_time_iso="2025-12-28 16:00:00-05:00", # EST
-    end_time_iso="2025-12-28 19:00:00-05:00",   # EST
+    start_time_iso = "2026-01-09T19:30:00-05:00"  # 7:30 p.m. ET / EST
+    end_time_iso = "2026-01-09T22:51:00-05:00"  # ~10:51 p.m. ET / EST
     
     # Polymarket IDs (Search on Polymarket CLOB or website)
-    poly_market_a_name="giants",
+    poly_market_a_name="ducks",
     poly_market_a_id='73918557025200502509758871521442098141094234730265102200780859356079067046938',
-    poly_market_b_name="raiders",
+    poly_market_b_name="hoosiers",
     poly_market_b_id='33566079885445560469389463113194331939749019446295875471687366161299733602645',
     
     # Kalshi Ticker
