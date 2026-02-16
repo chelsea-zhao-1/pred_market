@@ -24,3 +24,7 @@ data/
 *.png
 *.jpg
 *.jpeg
+
+# Live data (regenerated at runtime)
+live_market_data/*.csv
+live/market_config.json
