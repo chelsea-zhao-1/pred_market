@@ -9,8 +9,10 @@ venv/
 # Environment Variables & Secrets
 .env
 *.key
+*.pub
 *.pem
-proj1.txt 
+proj1.txt
+live/poly_credentials.json
 
 # OS
 .DS_Store

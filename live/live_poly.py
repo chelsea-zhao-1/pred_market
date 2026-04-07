@@ -25,6 +25,8 @@ import csv
 from datetime import datetime
 import pytz
 
+from order_book import OrderBook
+
 # --- USER CONFIGURATION---
 def load_config():
     """Load market config from market_config.json if it exists.
@@ -89,6 +91,12 @@ class PolymarketWebSocket:
         self.last_trade_prices = {}  # Store last trade price per asset_id
         self.label_map = label_map or {}  # token_id -> label (e.g. "Up", "Down")
         self.ordered_labels = ordered_labels or []  # ["Up", "Down"] for CSV column order
+
+        # Order book depth (maintained via book events)
+        self.books = {
+            aid: {"buys": OrderBook(), "sells": OrderBook()}
+            for aid in self.data
+        }
 
         # Create data folder if it doesn't exist
         os.makedirs(DATA_FOLDER, exist_ok=True)
@@ -208,7 +216,17 @@ class PolymarketWebSocket:
                         "no_ask": no_data.get("ask"),
                     })
 
-        elif event_type not in ("book",):
+        elif event_type == "book":
+            asset_id = data.get("asset_id")
+            if asset_id and asset_id in self.books:
+                buys = [(round(float(b["price"]) * 100), int(float(b["size"])))
+                        for b in data.get("buys", [])]
+                sells = [(round(float(s["price"]) * 100), int(float(s["size"])))
+                         for s in data.get("sells", [])]
+                self.books[asset_id]["buys"].snapshot(buys)
+                self.books[asset_id]["sells"].snapshot(sells)
+
+        else:
             print(f"[{timestamp}] Unknown event: {event_type}")
 
     def on_message(self, ws, message):
@@ -260,6 +278,8 @@ class PolymarketWebSocket:
         if self.channel_type == MARKET_CHANNEL:
             message = {"assets_ids": asset_ids, "operation": "subscribe"}
             self.ws.send(json.dumps(message))
+            for aid in asset_ids:
+                self.books[aid] = {"buys": OrderBook(), "sells": OrderBook()}
             print(f"Subscribed to additional assets: {asset_ids}")
 
     def unsubscribe_from_assets(self, asset_ids):
@@ -267,7 +287,23 @@ class PolymarketWebSocket:
         if self.channel_type == MARKET_CHANNEL:
             message = {"assets_ids": asset_ids, "operation": "unsubscribe"}
             self.ws.send(json.dumps(message))
+            for aid in asset_ids:
+                self.books.pop(aid, None)
             print(f"Unsubscribed from assets: {asset_ids}")
+
+    # ---------- depth accessors ----------
+
+    def get_yes_asks(self):
+        """YES asks = sells for the YES (first) asset, ascending."""
+        if len(self.data) < 1:
+            return []
+        return self.books.get(self.data[0], {}).get("sells", OrderBook()).get_levels_ascending()
+
+    def get_no_asks(self):
+        """NO asks = sells for the NO (second) asset, ascending."""
+        if len(self.data) < 2:
+            return []
+        return self.books.get(self.data[1], {}).get("sells", OrderBook()).get_levels_ascending()
 
     def _ping_loop(self, ws):
         """Send ping every 5 seconds to keep connection alive."""

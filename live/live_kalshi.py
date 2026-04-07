@@ -11,19 +11,7 @@ import websockets
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
-# ==============================================================================
-# CONFIGURATION
-# ==============================================================================
-
-TARGET_TICKERS = ["KXBTC15M-26FEB151230-30"]  # Replace with your ticker(s)
-PRINT_INTERVAL = 15.0       # Seconds between forced log entries
-CHANGE_THRESHOLD = 0.01     # Minimum price change to trigger immediate log
-
-KALSHI_KEY_ID = "42c80c6e-03de-49d1-84ed-6bd1132acb9c"
-KALSHI_PRIVATE_KEY_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "kalshi-main-key.key"
-)
+from order_book import OrderBook
 
 WS_URL = "wss://api.elections.kalshi.com/trade-api/ws/v2"
 WS_PATH = "/trade-api/ws/v2"
@@ -57,6 +45,13 @@ class KalshiWebSocket:
         self.est_tz = pytz.timezone("US/Eastern")
         self.latest_data = {}   # {ticker: {yes_bid, yes_ask, no_bid, no_ask}}
         self.last_log_time = 0.0
+        self._ws = None         # set during connect() for mid-session operations
+        self._cmd_id = 1        # monotonic command ID for subscribe/unsubscribe
+        self._loop = None       # event loop ref for cross-thread scheduling
+
+        # Order book depth (maintained via orderbook_delta channel)
+        self.yes_bids_book = OrderBook()
+        self.no_bids_book = OrderBook()
 
         self._private_key = self._load_private_key()
 
@@ -195,6 +190,24 @@ class KalshiWebSocket:
         if self.on_price_update:
             self.on_price_update(prices)
 
+    # ---------- depth accessors ----------
+
+    def get_yes_asks(self):
+        """YES asks derived from NO bids: ask = 1.0 - no_bid_price.
+
+        Returns [(price_dollars, qty), ...] sorted ascending (cheapest first).
+        """
+        no_bids = self.no_bids_book.get_levels_descending()
+        return [(round(1.0 - price, 4), qty) for price, qty in no_bids]
+
+    def get_no_asks(self):
+        """NO asks derived from YES bids: ask = 1.0 - yes_bid_price.
+
+        Returns [(price_dollars, qty), ...] sorted ascending (cheapest first).
+        """
+        yes_bids = self.yes_bids_book.get_levels_descending()
+        return [(round(1.0 - price, 4), qty) for price, qty in yes_bids]
+
     # ---------- message routing ----------
 
     def _handle_message(self, data):
@@ -211,6 +224,23 @@ class KalshiWebSocket:
             if self._should_log(ticker, prices):
                 self._log_ticker(ticker, prices)
 
+        elif msg_type == "orderbook_snapshot":
+            msg = data.get("msg", {})
+            yes_levels = [(entry[0], entry[1]) for entry in msg.get("yes", [])]
+            no_levels = [(entry[0], entry[1]) for entry in msg.get("no", [])]
+            self.yes_bids_book.snapshot(yes_levels)
+            self.no_bids_book.snapshot(no_levels)
+            print(f"Orderbook snapshot: {len(yes_levels)} yes levels, {len(no_levels)} no levels")
+
+        elif msg_type == "orderbook_delta":
+            msg = data.get("msg", {})
+            side = msg.get("side")
+            price = msg.get("price")
+            delta = msg.get("delta")
+            if side and price is not None and delta is not None:
+                book = self.yes_bids_book if side == "yes" else self.no_bids_book
+                book.update(price, delta)
+
         elif msg_type == "subscribed":
             sids = data.get("msg", {}).get("sids", [])
             print(f"Subscription confirmed (sids: {sids})")
@@ -218,22 +248,34 @@ class KalshiWebSocket:
         elif msg_type == "error":
             print(f"Error from Kalshi: {data.get('msg', data)}")
 
+        else:
+            if msg_type not in (None,):
+                print(f"[Kalshi] Unhandled message type: {msg_type}")
+
     # ---------- connection ----------
 
     async def connect(self):
         headers = self._generate_auth_headers()
 
         async with websockets.connect(WS_URL, additional_headers=headers) as ws:
-            subscribe_msg = {
-                "id": 1,
+            self._ws = ws
+
+            # Subscribe to ticker
+            self._cmd_id += 1
+            await ws.send(json.dumps({
+                "id": self._cmd_id,
                 "cmd": "subscribe",
-                "params": {
-                    "channels": ["ticker"],
-                    "market_tickers": self.tickers,
-                },
-            }
-            await ws.send(json.dumps(subscribe_msg))
-            print(f"Subscribed to ticker for: {self.tickers}")
+                "params": {"channels": ["ticker"], "market_tickers": self.tickers},
+            }))
+
+            # Subscribe to orderbook_delta (must be a separate call)
+            self._cmd_id += 1
+            await ws.send(json.dumps({
+                "id": self._cmd_id,
+                "cmd": "subscribe",
+                "params": {"channels": ["orderbook_delta"], "market_tickers": self.tickers},
+            }))
+            print(f"Subscribed to ticker + orderbook_delta for: {self.tickers}")
 
             async for message in ws:
                 try:
@@ -242,7 +284,42 @@ class KalshiWebSocket:
                     continue
                 self._handle_message(data)
 
+    async def update_tickers(self, new_tickers):
+        """Swap subscriptions mid-connection: unsubscribe old, subscribe new."""
+        if self._ws is None:
+            print("Warning: Cannot update tickers — no active connection.")
+            return
+
+        # Unsubscribe from current tickers (separate calls per channel)
+        for ch in ("ticker", "orderbook_delta"):
+            self._cmd_id += 1
+            await self._ws.send(json.dumps({
+                "id": self._cmd_id,
+                "cmd": "unsubscribe",
+                "params": {"channels": [ch], "market_tickers": self.tickers},
+            }))
+
+        # Clear stale data for old tickers
+        for t in self.tickers:
+            self.latest_data.pop(t, None)
+        self.yes_bids_book.clear()
+        self.no_bids_book.clear()
+
+        # Subscribe to new tickers (separate calls per channel)
+        for ch in ("ticker", "orderbook_delta"):
+            self._cmd_id += 1
+            await self._ws.send(json.dumps({
+                "id": self._cmd_id,
+                "cmd": "subscribe",
+                "params": {"channels": [ch], "market_tickers": new_tickers},
+            }))
+
+        old = self.tickers
+        self.tickers = new_tickers
+        print(f"Kalshi rotation: {old} -> {new_tickers}")
+
     async def run(self):
+        self._loop = asyncio.get_running_loop()
         reconnect_delay = 5
         max_delay = 60
 
@@ -274,12 +351,19 @@ class KalshiWebSocket:
 # ==============================================================================
 
 if __name__ == "__main__":
+    TARGET_TICKERS = ["KXBTC15M-26FEB271930-30"]  # Update per 15-min window
+    KALSHI_KEY_ID = "42c80c6e-03de-49d1-84ed-6bd1132acb9c"
+    KALSHI_PRIVATE_KEY_PATH = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "kalshi-main-key.key"
+    )
+
     client = KalshiWebSocket(
         tickers=TARGET_TICKERS,
         key_id=KALSHI_KEY_ID,
         private_key_path=KALSHI_PRIVATE_KEY_PATH,
-        print_interval=PRINT_INTERVAL,
-        change_threshold=CHANGE_THRESHOLD,
+        print_interval=15.0,
+        change_threshold=0.01,
     )
     try:
         asyncio.run(client.run())
