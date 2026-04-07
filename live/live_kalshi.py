@@ -6,6 +6,9 @@ import time
 import base64
 from datetime import datetime
 
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
+
 import pytz
 import websockets
 from cryptography.hazmat.primitives import hashes, serialization
@@ -352,7 +355,7 @@ class KalshiWebSocket:
 
 if __name__ == "__main__":
     TARGET_TICKERS = ["KXBTC15M-26FEB271930-30"]  # Update per 15-min window
-    KALSHI_KEY_ID = "42c80c6e-03de-49d1-84ed-6bd1132acb9c"
+    KALSHI_KEY_ID = os.environ["KALSHI_KEY_ID"]
     KALSHI_PRIVATE_KEY_PATH = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "kalshi-main-key.key"

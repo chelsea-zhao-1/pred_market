@@ -23,6 +23,9 @@ import threading
 import time
 from datetime import datetime
 
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
+
 import pytz
 
 from live_kalshi import KalshiWebSocket
@@ -38,7 +41,7 @@ from market_rotation import (
 
 KALSHI_TICKER = "KXBTC15M-26FEB281200-00"  # Update per 15-min window
 
-KALSHI_KEY_ID = "42c80c6e-03de-49d1-84ed-6bd1132acb9c"
+KALSHI_KEY_ID = os.environ["KALSHI_KEY_ID"]
 KALSHI_PRIVATE_KEY_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "kalshi-main-key.key"
