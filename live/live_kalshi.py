@@ -229,8 +229,15 @@ class KalshiWebSocket:
 
         elif msg_type == "orderbook_snapshot":
             msg = data.get("msg", {})
-            yes_levels = [(entry[0], entry[1]) for entry in msg.get("yes", [])]
-            no_levels = [(entry[0], entry[1]) for entry in msg.get("no", [])]
+            # API now sends yes_dollars_fp/no_dollars_fp: [["price_str", "qty_str"], ...]
+            yes_levels = [
+                (round(float(e[0]) * 100), float(e[1]))
+                for e in msg.get("yes_dollars_fp", [])
+            ]
+            no_levels = [
+                (round(float(e[0]) * 100), float(e[1]))
+                for e in msg.get("no_dollars_fp", [])
+            ]
             self.yes_bids_book.snapshot(yes_levels)
             self.no_bids_book.snapshot(no_levels)
             print(f"Orderbook snapshot: {len(yes_levels)} yes levels, {len(no_levels)} no levels")
@@ -238,11 +245,14 @@ class KalshiWebSocket:
         elif msg_type == "orderbook_delta":
             msg = data.get("msg", {})
             side = msg.get("side")
-            price = msg.get("price")
-            delta = msg.get("delta")
-            if side and price is not None and delta is not None:
+            # API now sends price_dollars (str) and delta_fp (str)
+            price_str = msg.get("price_dollars")
+            delta_str = msg.get("delta_fp")
+            if side and price_str is not None and delta_str is not None:
+                price_cents = round(float(price_str) * 100)
+                delta = float(delta_str)
                 book = self.yes_bids_book if side == "yes" else self.no_bids_book
-                book.update(price, delta)
+                book.update(price_cents, delta)
 
         elif msg_type == "subscribed":
             sids = data.get("msg", {}).get("sids", [])

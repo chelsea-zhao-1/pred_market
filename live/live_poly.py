@@ -92,7 +92,7 @@ class PolymarketWebSocket:
         self.label_map = label_map or {}  # token_id -> label (e.g. "Up", "Down")
         self.ordered_labels = ordered_labels or []  # ["Up", "Down"] for CSV column order
 
-        # Order book depth (maintained via book events)
+        # Order book depth (maintained via book events on the market channel)
         self.books = {
             aid: {"buys": OrderBook(), "sells": OrderBook()}
             for aid in self.data
@@ -219,15 +219,16 @@ class PolymarketWebSocket:
         elif event_type == "book":
             asset_id = data.get("asset_id")
             if asset_id and asset_id in self.books:
-                buys = [(round(float(b["price"]) * 100), int(float(b["size"])))
-                        for b in data.get("buys", [])]
-                sells = [(round(float(s["price"]) * 100), int(float(s["size"])))
-                         for s in data.get("sells", [])]
-                self.books[asset_id]["buys"].snapshot(buys)
-                self.books[asset_id]["sells"].snapshot(sells)
+                bids = [(round(float(b["price"]) * 100), float(b["size"]))
+                        for b in data.get("bids", [])]
+                asks = [(round(float(s["price"]) * 100), float(s["size"]))
+                        for s in data.get("asks", [])]
+                self.books[asset_id]["buys"].snapshot(bids)
+                self.books[asset_id]["sells"].snapshot(asks)
+                print(f"[Poly book] snapshot asset={asset_id[:8]}... bids={len(bids)} asks={len(asks)}")
 
         else:
-            print(f"[{timestamp}] Unknown event: {event_type}")
+            print(f"[Poly] Unknown event_type={event_type!r}")
 
     def on_message(self, ws, message):
         """Handle incoming WebSocket messages and extract key data."""

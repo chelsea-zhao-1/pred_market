@@ -39,7 +39,7 @@ from market_rotation import (
 # CONFIGURATION
 # ==============================================================================
 
-KALSHI_TICKER = "KXBTC15M-26FEB281200-00"  # Update per 15-min window
+KALSHI_TICKER = "KXBTC15M-26MAY141045-45"  # Update per 15-min window
 
 KALSHI_KEY_ID = os.environ["KALSHI_KEY_ID"]
 KALSHI_PRIVATE_KEY_PATH = os.path.join(
@@ -101,13 +101,10 @@ def kalshi_taker_fee(price):
 
 
 def poly_taker_fee(price):
-    """Polymarket taker fee per share for 15-min crypto markets.
-
-    Formula: 0.25 * p * (p * (1-p))^2, rounded to 4 decimal places.
-    """
+    """Polymarket taker fee per share: feeRate * p * (1 - p), feeRate = 0.072 for takers."""
     if price <= 0 or price >= 1:
         return 0.0
-    return round(0.25 * price * (price * (1 - price)) ** 2, 4)
+    return round(0.072 * price * (1 - price), 4)
 
 
 # ==============================================================================
