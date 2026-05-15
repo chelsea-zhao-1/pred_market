@@ -65,8 +65,8 @@ WS_URL = "wss://ws-subscriptions-clob.polymarket.com"
 MARKET_CHANNEL = "market"
 
 # Data folder and file (resolved relative to script location)
-DATA_FOLDER = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "live_market_data")
-DATA_FILE = os.path.join(DATA_FOLDER, "poly_market_data.csv")
+DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "live_market_data")
+DATA_FILE = os.path.join(DATA_DIR, "poly_market_data.csv")
 
 
 class PolymarketWebSocket:
@@ -86,7 +86,7 @@ class PolymarketWebSocket:
         self.verbose = verbose
         self.print_interval = print_interval  # Minimum seconds between prints
         self.change_threshold = change_threshold  # Minimum change in bid/ask to trigger print
-        self.last_print_time = 0.0
+        self.last_log_time = 0.0
         self.latest_data = {}  # Store latest bid/ask per asset_id
         self.last_trade_prices = {}  # Store last trade price per asset_id
         self.label_map = label_map or {}  # token_id -> label (e.g. "Up", "Down")
@@ -94,18 +94,14 @@ class PolymarketWebSocket:
 
         # Order book depth (maintained via book events on the market channel)
         self.books = {
-            aid: {"buys": OrderBook(), "sells": OrderBook()}
+            aid: {"bids": OrderBook(), "asks": OrderBook()}
             for aid in self.data
         }
 
-        # Create data folder if it doesn't exist
-        os.makedirs(DATA_FOLDER, exist_ok=True)
+        os.makedirs(DATA_DIR, exist_ok=True)
 
-        # Initialize CSV file
-        self.csv_file = open(DATA_FILE, "a", newline="", encoding="utf-8")
-        self.csv_writer = csv.writer(self.csv_file)
-        # EST timezone for timestamp conversion
-        self.est_tz = pytz.timezone('US/Eastern')
+        self._csv_file = open(DATA_FILE, "a", newline="", encoding="utf-8")
+        self._csv_writer = csv.writer(self._csv_file)
         # Write header if file is new/empty
         if os.path.getsize(DATA_FILE) == 0:
             header = [
@@ -113,8 +109,8 @@ class PolymarketWebSocket:
                 "yes_bid", "yes_ask", "no_bid", "no_ask",
                 "yes_mid", "no_mid"
             ]
-            self.csv_writer.writerow(header)
-            self.csv_file.flush()
+            self._csv_writer.writerow(header)
+            self._csv_file.flush()
 
         # Build full WebSocket URL
         self.full_url = f"{url}/ws/{channel_type}"
@@ -126,12 +122,10 @@ class PolymarketWebSocket:
             on_open=self.on_open,
         )
 
-    def convert_ms_to_est(self, timestamp_ms):
-        """Convert millisecond timestamp to EST datetime string"""
-        timestamp_sec = int(timestamp_ms) / 1000
-        utc_dt = datetime.fromtimestamp(timestamp_sec, tz=pytz.UTC)
-        est_dt = utc_dt.astimezone(self.est_tz)
-        return est_dt.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]  # Include milliseconds
+    @staticmethod
+    def _ms_to_est(timestamp_ms):
+        utc_dt = datetime.fromtimestamp(int(timestamp_ms) / 1000, tz=pytz.UTC)
+        return utc_dt.astimezone(pytz.timezone("US/Eastern")).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
     @staticmethod
     def _calc_mid(bid, ask, last):
@@ -154,8 +148,9 @@ class PolymarketWebSocket:
 
         elif event_type == "price_change":
             current_time = time.time()
-            should_print = (current_time - self.last_print_time) >= self.print_interval
-            any_changed = False
+            should_log = (current_time - self.last_log_time) >= self.print_interval
+            any_update = False
+            any_significant = False
 
             for change in data.get("price_changes", []):
                 asset_id = change.get("asset_id")
@@ -170,42 +165,12 @@ class PolymarketWebSocket:
                     bid_changed = abs(best_bid - prev_bid) >= self.change_threshold
                     ask_changed = abs(best_ask - prev_ask) >= self.change_threshold
 
-                    if bid_changed or ask_changed or should_print:
-                        self.latest_data[asset_id] = {"bid": best_bid, "ask": best_ask}
-                        any_changed = True
+                    self.latest_data[asset_id] = {"bid": best_bid, "ask": best_ask}
+                    any_update = True
+                    if bid_changed or ask_changed:
+                        any_significant = True
 
-            if any_changed:
-                timestamp_est = self.convert_ms_to_est(timestamp)
-                # First asset_id = yes, second = no
-                row = [timestamp, timestamp_est]
-                parts = []
-                yes_mid = ""
-                no_mid = ""
-                for i, asset_id in enumerate(self.data):
-                    d = self.latest_data.get(asset_id, {})
-                    bid = d.get("bid", "")
-                    ask = d.get("ask", "")
-                    last = self.last_trade_prices.get(asset_id)
-                    mid = self._calc_mid(
-                        bid if bid != "" else None,
-                        ask if ask != "" else None,
-                        last
-                    )
-                    side = "YES" if i == 0 else "NO"
-                    row.extend([bid, ask])
-                    mid_str = mid if mid != "" else "?"
-                    parts.append(f"{side} {bid}/{ask} mid={mid_str}")
-                    # Store mid to append after all bid/ask pairs
-                    if i == 0:
-                        yes_mid = mid
-                    else:
-                        no_mid = mid
-                row.extend([yes_mid, no_mid])
-                print(f"[{timestamp_est}] {' | '.join(parts)}")
-                self.csv_writer.writerow(row)
-                self.csv_file.flush()
-                self.last_print_time = time.time()
-
+            if any_update:
                 if self.on_price_update and len(self.data) >= 2:
                     yes_data = self.latest_data.get(self.data[0], {})
                     no_data = self.latest_data.get(self.data[1], {})
@@ -216,6 +181,36 @@ class PolymarketWebSocket:
                         "no_ask": no_data.get("ask"),
                     })
 
+                if any_significant or should_log:
+                    timestamp_est = self._ms_to_est(timestamp)
+                    row = [timestamp, timestamp_est]
+                    parts = []
+                    yes_mid = ""
+                    no_mid = ""
+                    for i, asset_id in enumerate(self.data):
+                        d = self.latest_data.get(asset_id, {})
+                        bid = d.get("bid", "")
+                        ask = d.get("ask", "")
+                        last = self.last_trade_prices.get(asset_id)
+                        mid = self._calc_mid(
+                            bid if bid != "" else None,
+                            ask if ask != "" else None,
+                            last
+                        )
+                        side = "YES" if i == 0 else "NO"
+                        row.extend([bid, ask])
+                        mid_str = mid if mid != "" else "?"
+                        parts.append(f"{side} {bid}/{ask} mid={mid_str}")
+                        if i == 0:
+                            yes_mid = mid
+                        else:
+                            no_mid = mid
+                    row.extend([yes_mid, no_mid])
+                    print(f"[{timestamp_est}] {' | '.join(parts)}")
+                    self._csv_writer.writerow(row)
+                    self._csv_file.flush()
+                    self.last_log_time = current_time
+
         elif event_type == "book":
             asset_id = data.get("asset_id")
             if asset_id and asset_id in self.books:
@@ -223,8 +218,8 @@ class PolymarketWebSocket:
                         for b in data.get("bids", [])]
                 asks = [(round(float(s["price"]) * 100), float(s["size"]))
                         for s in data.get("asks", [])]
-                self.books[asset_id]["buys"].snapshot(bids)
-                self.books[asset_id]["sells"].snapshot(asks)
+                self.books[asset_id]["bids"].snapshot(bids)
+                self.books[asset_id]["asks"].snapshot(asks)
                 print(f"[Poly book] snapshot asset={asset_id[:8]}... bids={len(bids)} asks={len(asks)}")
 
         else:
@@ -255,8 +250,10 @@ class PolymarketWebSocket:
         print("WebSocket Error:", error)
 
     def on_close(self, ws, close_status_code, close_msg):
-        """Handle WebSocket closure."""
         print("WebSocket Closed:", close_status_code, close_msg)
+        for books in self.books.values():
+            books["bids"].clear()
+            books["asks"].clear()
 
     def on_open(self, ws):
         """Handle WebSocket opening and send subscription."""
@@ -280,7 +277,7 @@ class PolymarketWebSocket:
             message = {"assets_ids": asset_ids, "operation": "subscribe"}
             self.ws.send(json.dumps(message))
             for aid in asset_ids:
-                self.books[aid] = {"buys": OrderBook(), "sells": OrderBook()}
+                self.books[aid] = {"bids": OrderBook(), "asks": OrderBook()}
             print(f"Subscribed to additional assets: {asset_ids}")
 
     def unsubscribe_from_assets(self, asset_ids):
@@ -295,16 +292,16 @@ class PolymarketWebSocket:
     # ---------- depth accessors ----------
 
     def get_yes_asks(self):
-        """YES asks = sells for the YES (first) asset, ascending."""
+        """YES asks for the YES (first) asset, ascending."""
         if len(self.data) < 1:
             return []
-        return self.books.get(self.data[0], {}).get("sells", OrderBook()).get_levels_ascending()
+        return self.books.get(self.data[0], {}).get("asks", OrderBook()).get_levels_ascending()
 
     def get_no_asks(self):
-        """NO asks = sells for the NO (second) asset, ascending."""
+        """NO asks for the NO (second) asset, ascending."""
         if len(self.data) < 2:
             return []
-        return self.books.get(self.data[1], {}).get("sells", OrderBook()).get_levels_ascending()
+        return self.books.get(self.data[1], {}).get("asks", OrderBook()).get_levels_ascending()
 
     def _ping_loop(self, ws):
         """Send ping every 5 seconds to keep connection alive."""

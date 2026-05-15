@@ -16,7 +16,7 @@ from cryptography.hazmat.primitives.asymmetric import padding
 
 from order_book import OrderBook
 
-WS_URL = "wss://api.elections.kalshi.com/trade-api/ws/v2"
+WS_URL = "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
 WS_PATH = "/trade-api/ws/v2"
 
 DATA_DIR = os.path.join(
@@ -106,24 +106,18 @@ class KalshiWebSocket:
 
         Kalshi has a single order book -- no prices are the complement of yes.
         """
-        def _get(field_dollars, field_cents):
-            val = msg.get(field_dollars)
+        def _dollars(field):
+            val = msg.get(field)
             if val is not None:
                 try:
                     return float(val)
                 except (TypeError, ValueError):
                     pass
-            cents = msg.get(field_cents)
-            if cents is not None:
-                try:
-                    return float(cents) / 100
-                except (TypeError, ValueError):
-                    pass
             return None
 
-        yes_bid = _get("yes_bid_dollars", "yes_bid")
-        yes_ask = _get("yes_ask_dollars", "yes_ask")
-        yes_last = _get("price_dollars", "price")
+        yes_bid = _dollars("yes_bid_dollars")
+        yes_ask = _dollars("yes_ask_dollars")
+        yes_last = _dollars("price_dollars")
 
         return {
             "yes_bid": yes_bid,
@@ -273,20 +267,11 @@ class KalshiWebSocket:
         async with websockets.connect(WS_URL, additional_headers=headers) as ws:
             self._ws = ws
 
-            # Subscribe to ticker
             self._cmd_id += 1
             await ws.send(json.dumps({
                 "id": self._cmd_id,
                 "cmd": "subscribe",
-                "params": {"channels": ["ticker"], "market_tickers": self.tickers},
-            }))
-
-            # Subscribe to orderbook_delta (must be a separate call)
-            self._cmd_id += 1
-            await ws.send(json.dumps({
-                "id": self._cmd_id,
-                "cmd": "subscribe",
-                "params": {"channels": ["orderbook_delta"], "market_tickers": self.tickers},
+                "params": {"channels": ["ticker", "orderbook_delta"], "market_tickers": self.tickers},
             }))
             print(f"Subscribed to ticker + orderbook_delta for: {self.tickers}")
 
@@ -303,14 +288,12 @@ class KalshiWebSocket:
             print("Warning: Cannot update tickers — no active connection.")
             return
 
-        # Unsubscribe from current tickers (separate calls per channel)
-        for ch in ("ticker", "orderbook_delta"):
-            self._cmd_id += 1
-            await self._ws.send(json.dumps({
-                "id": self._cmd_id,
-                "cmd": "unsubscribe",
-                "params": {"channels": [ch], "market_tickers": self.tickers},
-            }))
+        self._cmd_id += 1
+        await self._ws.send(json.dumps({
+            "id": self._cmd_id,
+            "cmd": "unsubscribe",
+            "params": {"channels": ["ticker", "orderbook_delta"], "market_tickers": self.tickers},
+        }))
 
         # Clear stale data for old tickers
         for t in self.tickers:
@@ -318,14 +301,12 @@ class KalshiWebSocket:
         self.yes_bids_book.clear()
         self.no_bids_book.clear()
 
-        # Subscribe to new tickers (separate calls per channel)
-        for ch in ("ticker", "orderbook_delta"):
-            self._cmd_id += 1
-            await self._ws.send(json.dumps({
-                "id": self._cmd_id,
-                "cmd": "subscribe",
-                "params": {"channels": [ch], "market_tickers": new_tickers},
-            }))
+        self._cmd_id += 1
+        await self._ws.send(json.dumps({
+            "id": self._cmd_id,
+            "cmd": "subscribe",
+            "params": {"channels": ["ticker", "orderbook_delta"], "market_tickers": new_tickers},
+        }))
 
         old = self.tickers
         self.tickers = new_tickers

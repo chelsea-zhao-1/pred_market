@@ -15,7 +15,7 @@ from datetime import datetime, timezone, timedelta
 
 import pytz
 
-EST = pytz.timezone("US/Eastern")
+EST_TZ = pytz.timezone("US/Eastern")
 
 # Flag an alert as a rotation artifact if one side has a price near settlement
 # and the other is near 50/50 (i.e., from a different window).
@@ -66,7 +66,7 @@ def load_csv(path):
         for row in reader:
             try:
                 dt = datetime.strptime(row["timestamp_est"], "%Y-%m-%d %H:%M:%S.%f")
-                dt = EST.localize(dt)
+                dt = EST_TZ.localize(dt)
                 rows.append({
                     "dt": dt,
                     "leg": row["leg"],
@@ -224,7 +224,7 @@ def try_plot(rows):
                     ax.axvline(b, color="black", linewidth=0.8, linestyle="--", alpha=0.5)
             dt += td(hours=1)
 
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M", tz=EST))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M", tz=EST_TZ))
         ax.set_xlabel("Time (EST)")
         ax.set_ylabel("Net Profit / contract ($)")
         ax.set_title("Arbitrage Alerts — Red = artifact, Orange = rotation zone, Blue = normal")

@@ -101,10 +101,10 @@ def kalshi_taker_fee(price):
 
 
 def poly_taker_fee(price):
-    """Polymarket taker fee per share: feeRate * p * (1 - p), feeRate = 0.072 for takers."""
+    """Polymarket taker fee per share: feeRate * p * (1 - p), feeRate = 0.07 for takers."""
     if price <= 0 or price >= 1:
         return 0.0
-    return round(0.072 * price * (1 - price), 4)
+    return round(0.07 * price * (1 - price), 4)
 
 
 # ==============================================================================
@@ -391,7 +391,7 @@ def main():
     detector = ArbitrageDetector(min_margin=MIN_MARGIN)
 
     # --- Executor setup (only when EXECUTION_ENABLED = True) ---
-    kalshi_fix_client = None
+    kalshi_rest_client = None
     executor = None
     if EXECUTION_ENABLED:
         import json
@@ -401,11 +401,11 @@ def main():
         with open(creds_path) as f:
             creds = json.load(f)
 
-        kalshi_fix_client = KalshiRestClient(KALSHI_KEY_ID, KALSHI_PRIVATE_KEY_PATH)
-        kalshi_fix_client.connect()
+        kalshi_rest_client = KalshiRestClient(KALSHI_KEY_ID, KALSHI_PRIVATE_KEY_PATH)
+        kalshi_rest_client.connect()
 
         poly_order_client = PolyOrderClient(creds["private_key"])
-        executor = OrderExecutor(kalshi_fix_client, poly_order_client)
+        executor = OrderExecutor(kalshi_rest_client, poly_order_client)
         detector.set_executor(executor)
         print(f"[Scanner] Execution ENABLED — max {MAX_CONTRACTS_CAP} contracts/opportunity")
 
@@ -499,8 +499,8 @@ def main():
         detector.close()
         if executor:
             executor.close()
-        if kalshi_fix_client:
-            kalshi_fix_client.disconnect()
+        if kalshi_rest_client:
+            kalshi_rest_client.disconnect()
 
 
 if __name__ == "__main__":

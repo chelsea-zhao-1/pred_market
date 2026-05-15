@@ -22,5 +22,5 @@ tzdata==2025.3
 urllib3==2.6.2
 websockets
 simplefix
-py-clob-client
+py-clob-client-v2
 python-dotenv

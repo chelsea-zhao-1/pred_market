@@ -2,7 +2,7 @@
 Order Executor — Simultaneous dual-leg order placement for Kalshi + Polymarket.
 
 Kalshi:    FIX protocol over TLS (simplefix library)
-           Host: fix.elections.kalshi.com  Port: 8228 (no-retransmit)
+           Host: mm.fix.elections.kalshi.com  Port: 8228 (no-retransmit)
            Auth: RSA-PSS signature of Logon prehash (same key as REST/WS)
 
 Polymarket: CLOB REST API (py-clob-client library)
@@ -41,7 +41,7 @@ from cryptography.hazmat.primitives.asymmetric import padding
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-FIX_HOST       = "fix.elections.kalshi.com"
+FIX_HOST       = "mm.fix.elections.kalshi.com"
 FIX_PORT       = 8228          # Order Entry, no retransmission
 FIX_TARGET     = "KalshiNR"   # TargetCompID for port 8228
 FIX_HEARTBEAT  = 30            # seconds
@@ -384,7 +384,7 @@ class KalshiRestClient:
     place_order() sends an IOC limit order via POST /portfolio/orders.
     """
 
-    _BASE_DOMAIN = "https://api.elections.kalshi.com"
+    _BASE_DOMAIN = "https://external-api.kalshi.com"
     _BASE_PATH   = "/trade-api/v2"
 
     def __init__(self, key_id: str, private_key_path: str):
@@ -514,26 +514,24 @@ class PolyOrderClient:
 
     def __init__(self, private_key: str, chain_id: int = 137):
         try:
-            from py_clob_client.client import ClobClient
-            from py_clob_client.clob_types import OrderArgs, OrderType
-            from py_clob_client.order_builder.constants import BUY
+            from py_clob_client_v2.client import ClobClient
+            from py_clob_client_v2.clob_types import OrderArgs, OrderType, Side, PartialCreateOrderOptions
         except ImportError:
             raise ImportError(
-                "py-clob-client is required for Polymarket order placement. "
-                "Install with: pip install py-clob-client"
+                "py-clob-client-v2 is required for Polymarket order placement. "
+                "Install with: pip install py-clob-client-v2"
             )
 
         self._OrderArgs = OrderArgs
         self._OrderType = OrderType
-        self._BUY = BUY
+        self._Side = Side
+        self._PartialCreateOrderOptions = PartialCreateOrderOptions
 
         self._client = ClobClient(
-            "https://clob.polymarket.com",
+            host="https://clob.polymarket.com",
             key=private_key,
             chain_id=chain_id,
-            signature_type=0,   # EOA wallet
         )
-        # Derive L2 API credentials from the private key (one-time call)
         self._client.set_api_creds(self._client.create_or_derive_api_creds())
         print("[Poly] CLOB client initialized.")
 
@@ -552,10 +550,13 @@ class PolyOrderClient:
                 token_id=token_id,
                 price=price,
                 size=float(size),
-                side=self._BUY,
+                side=self._Side.BUY,
             )
-            signed = self._client.create_order(order_args)
-            resp = self._client.post_order(signed, self._OrderType.GTC)
+            resp = self._client.create_and_post_order(
+                order_args=order_args,
+                options=self._PartialCreateOrderOptions(tick_size="0.01"),
+                order_type=self._OrderType.FOK,
+            )
             order_id = resp.get("orderID") or resp.get("order_id")
             return {"ok": True, "order_id": order_id}
         except Exception as e:
@@ -575,7 +576,7 @@ class OrderExecutor:
     8 seconds, then logs and prints the result.
     """
 
-    def __init__(self, kalshi_fix: KalshiFixClient, poly: PolyOrderClient):
+    def __init__(self, kalshi_fix: KalshiRestClient, poly: PolyOrderClient):
         self._kalshi = kalshi_fix
         self._poly = poly
 
