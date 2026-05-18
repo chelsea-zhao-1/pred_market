@@ -15,13 +15,13 @@ SETUP:
   If no market_config.json exists, the hardcoded ASSET_IDS below are used
   as a fallback.
 """
-# Imports
 from websocket import WebSocketApp
-import json
-import time
-import threading
-import os
 import csv
+import json
+import os
+import queue
+import threading
+import time
 from datetime import datetime
 import pytz
 
@@ -69,6 +69,30 @@ DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 DATA_FILE = os.path.join(DATA_DIR, "poly_market_data.csv")
 
 
+class _CsvWriter:
+    """Background CSV writer — enqueues rows and flushes off the hot path."""
+
+    def __init__(self, file, writer):
+        self._file = file
+        self._writer = writer
+        self._q: queue.Queue = queue.Queue()
+        threading.Thread(target=self._run, daemon=True, name="csv-writer-poly").start()
+
+    def writerow(self, row):
+        self._q.put(row)
+
+    def close(self):
+        self._q.put(None)
+
+    def _run(self):
+        while True:
+            row = self._q.get()
+            if row is None:
+                break
+            self._writer.writerow(row)
+            self._file.flush()
+
+
 class PolymarketWebSocket:
     """
     WebSocket client for Polymarket market or user channels.
@@ -100,17 +124,16 @@ class PolymarketWebSocket:
 
         os.makedirs(DATA_DIR, exist_ok=True)
 
-        self._csv_file = open(DATA_FILE, "a", newline="", encoding="utf-8")
-        self._csv_writer = csv.writer(self._csv_file)
-        # Write header if file is new/empty
+        _f = open(DATA_FILE, "a", newline="", encoding="utf-8")
+        _w = csv.writer(_f)
         if os.path.getsize(DATA_FILE) == 0:
-            header = [
+            _w.writerow([
                 "timestamp_ms", "timestamp_est",
                 "yes_bid", "yes_ask", "no_bid", "no_ask",
                 "yes_mid", "no_mid"
-            ]
-            self._csv_writer.writerow(header)
-            self._csv_file.flush()
+            ])
+            _f.flush()
+        self._csv = _CsvWriter(_f, _w)
 
         # Build full WebSocket URL
         self.full_url = f"{url}/ws/{channel_type}"
@@ -207,8 +230,7 @@ class PolymarketWebSocket:
                             no_mid = mid
                     row.extend([yes_mid, no_mid])
                     print(f"[{timestamp_est}] {' | '.join(parts)}")
-                    self._csv_writer.writerow(row)
-                    self._csv_file.flush()
+                    self._csv.writerow(row)
                     self.last_log_time = current_time
 
         elif event_type == "book":
@@ -257,8 +279,12 @@ class PolymarketWebSocket:
 
     def on_open(self, ws):
         """Handle WebSocket opening and send subscription."""
+        # Always clear books on (re)connect — on_close may not fire on hard drops
+        for book_pair in self.books.values():
+            book_pair["bids"].clear()
+            book_pair["asks"].clear()
+
         if self.channel_type == MARKET_CHANNEL:
-            # Subscribe to market data
             subscription = {"assets_ids": self.data, "type": MARKET_CHANNEL}
             ws.send(json.dumps(subscription))
             print(f"Subscribed to market channel for assets: {self.data}")
@@ -314,8 +340,11 @@ class PolymarketWebSocket:
                 print("Ping error:", e)
                 break
 
+    def close(self):
+        self._csv.close()
+
     def run(self):
-        """Start the WebSocket connection with reconnection logic. To ensure connection stays alive"""
+        """Start the WebSocket connection with reconnection logic."""
         reconnect_delay = 5
         max_delay = 60
 

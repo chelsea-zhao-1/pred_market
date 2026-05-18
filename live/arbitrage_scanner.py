@@ -19,6 +19,7 @@ import asyncio
 import csv
 import math
 import os
+import queue
 import threading
 import time
 from datetime import datetime
@@ -39,7 +40,7 @@ from market_rotation import (
 # CONFIGURATION
 # ==============================================================================
 
-KALSHI_TICKER = "KXBTC15M-26MAY141045-45"  # Update per 15-min window
+KALSHI_TICKER = "KXBTC15M-26MAY151300-00"  # Update per 15-min window
 
 KALSHI_KEY_ID = os.environ["KALSHI_KEY_ID"]
 KALSHI_PRIVATE_KEY_PATH = os.path.join(
@@ -50,8 +51,8 @@ KALSHI_PRIVATE_KEY_PATH = os.path.join(
 
 POLY_WS_URL = "wss://ws-subscriptions-clob.polymarket.com"
 
-# Minimum NET profit (after fees) to trigger an alert.
-MIN_MARGIN = 0.0
+# Min per-contract profit after slippage + fees to trigger an alert and execute.
+MIN_PROFIT_DOLLARS = 0.05
 
 # ── Execution settings ────────────────────────────────────────────────────────
 # Set EXECUTION_ENABLED = True only when ready to trade real money.
@@ -159,15 +160,44 @@ def _walk_depth(kalshi_asks, poly_asks):
 # ARBITRAGE DETECTOR
 # ==============================================================================
 
+class _CsvWriter:
+    """Background CSV writer — enqueues rows so flushes don't block WS threads."""
+
+    def __init__(self, file, writer):
+        self._file = file
+        self._writer = writer
+        self._q: queue.Queue = queue.Queue()
+        threading.Thread(target=self._run, daemon=True, name="csv-writer-alerts").start()
+
+    def writerow(self, row):
+        self._q.put(row)
+
+    def close(self):
+        self._q.put(None)
+
+    def _run(self):
+        while True:
+            row = self._q.get()
+            if row is None:
+                break
+            self._writer.writerow(row)
+            self._file.flush()
+
+
 class ArbitrageDetector:
     """Thread-safe cross-platform arbitrage detector.
 
     Receives price updates from both Kalshi and Polymarket WS clients
     and checks whether buying YES on one + NO on the other costs < $1.
+
+    Lock is held only for the price snapshot — depth walk and alert run
+    outside the lock so neither WS thread blocks waiting on the other.
     """
 
-    def __init__(self, min_margin=0.0):
-        self.min_margin = min_margin
+    # Suppress duplicate alerts for the same leg within this window (seconds).
+    _ALERT_DEDUP_SECS = 1.0
+
+    def __init__(self):
         self.kalshi_prices = None
         self.poly_prices = None
         self.kalshi_updated_at = 0.0
@@ -176,61 +206,68 @@ class ArbitrageDetector:
         self.poly_client = None    # set after construction for depth access
         self._executor = None      # set via set_executor() if EXECUTION_ENABLED
         self.lock = threading.Lock()
+        self._alert_lock = threading.Lock()
+        self._last_alert: dict = {}  # leg -> last alert timestamp
 
         os.makedirs(DATA_DIR, exist_ok=True)
         session_ts = datetime.now(EST_TZ).strftime("%Y%m%d_%H%M%S")
         self.alerts_file = os.path.join(DATA_DIR, f"arb_alerts_{session_ts}.csv")
-        self._csv_file = open(self.alerts_file, "w", newline="")
-        self._csv_writer = csv.writer(self._csv_file)
-        self._csv_writer.writerow(ALERTS_HEADER)
-        self._csv_file.flush()
+        _f = open(self.alerts_file, "w", newline="")
+        _w = csv.writer(_f)
+        _w.writerow(ALERTS_HEADER)
+        _f.flush()
+        self._csv = _CsvWriter(_f, _w)
 
     def update_kalshi(self, prices):
         with self.lock:
             self.kalshi_prices = prices
             self.kalshi_updated_at = time.time()
-            self._check()
+            k, p = self.kalshi_prices, self.poly_prices
+            k_age, p_age = self.kalshi_updated_at, self.poly_updated_at
+        # Lock released — depth walk runs without blocking the Poly WS thread.
+        self._check(k, p, k_age, p_age)
 
     def update_poly(self, prices):
         with self.lock:
             self.poly_prices = prices
             self.poly_updated_at = time.time()
-            self._check()
+            k, p = self.kalshi_prices, self.poly_prices
+            k_age, p_age = self.kalshi_updated_at, self.poly_updated_at
+        # Lock released — depth walk runs without blocking the Kalshi asyncio loop.
+        self._check(k, p, k_age, p_age)
 
-    def _check(self):
-        k = self.kalshi_prices
-        p = self.poly_prices
+    def _check(self, k, p, k_age, p_age):
         if k is None or p is None:
             return
 
         now = time.time()
-        if (now - self.kalshi_updated_at) > STALE_THRESHOLD:
+        if (now - k_age) > STALE_THRESHOLD:
             return
-        if (now - self.poly_updated_at) > STALE_THRESHOLD:
+        if (now - p_age) > STALE_THRESHOLD:
             return
 
         # Leg A: Buy YES @ Kalshi + Buy NO @ Polymarket
         k_yes_ask = k.get("yes_ask")
         p_no_ask = p.get("no_ask")
         if k_yes_ask is not None and p_no_ask is not None:
-            k_fee = kalshi_taker_fee(k_yes_ask)
-            p_fee = poly_taker_fee(p_no_ask)
-            cost_a = k_yes_ask + p_no_ask
-            net = 1.0 - cost_a - k_fee - p_fee
-            if net > self.min_margin:
-                mc, tp = self._compute_fill_depth("A")
+            mc, tp = self._compute_fill_depth("A")
+            if mc > 0 and (tp / mc) >= MIN_PROFIT_DOLLARS:
+                k_fee = kalshi_taker_fee(k_yes_ask)
+                p_fee = poly_taker_fee(p_no_ask)
+                cost_a = k_yes_ask + p_no_ask
+                net = 1.0 - cost_a - k_fee - p_fee
                 self._alert("A", cost_a, k_fee, p_fee, net, k, p, mc, tp)
 
         # Leg B: Buy NO @ Kalshi + Buy YES @ Polymarket
         k_no_ask = k.get("no_ask")
         p_yes_ask = p.get("yes_ask")
         if k_no_ask is not None and p_yes_ask is not None:
-            k_fee = kalshi_taker_fee(k_no_ask)
-            p_fee = poly_taker_fee(p_yes_ask)
-            cost_b = k_no_ask + p_yes_ask
-            net = 1.0 - cost_b - k_fee - p_fee
-            if net > self.min_margin:
-                mc, tp = self._compute_fill_depth("B")
+            mc, tp = self._compute_fill_depth("B")
+            if mc > 0 and (tp / mc) >= MIN_PROFIT_DOLLARS:
+                k_fee = kalshi_taker_fee(k_no_ask)
+                p_fee = poly_taker_fee(p_yes_ask)
+                cost_b = k_no_ask + p_yes_ask
+                net = 1.0 - cost_b - k_fee - p_fee
                 self._alert("B", cost_b, k_fee, p_fee, net, k, p, mc, tp)
 
     def _compute_fill_depth(self, leg):
@@ -246,8 +283,16 @@ class ArbitrageDetector:
         return _walk_depth(k_asks, p_asks)
 
     def _alert(self, leg, cost, k_fee, p_fee, net_profit, k, p, max_contracts=0, total_profit=0.0):
-        ts_ms = int(time.time() * 1000)
-        utc_dt = datetime.fromtimestamp(ts_ms / 1000, tz=pytz.UTC)
+        # Dedup: when both platforms tick within ~100ms of each other, _check()
+        # runs twice with identical prices. Skip the second fire per leg.
+        with self._alert_lock:
+            now = time.time()
+            if now - self._last_alert.get(leg, 0.0) < self._ALERT_DEDUP_SECS:
+                return
+            self._last_alert[leg] = now
+
+        ts_ms = int(now * 1000)
+        utc_dt = datetime.fromtimestamp(now, tz=pytz.UTC)
         ts_est = utc_dt.astimezone(EST_TZ).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         total_fees = k_fee + p_fee
 
@@ -256,10 +301,11 @@ class ArbitrageDetector:
         else:
             desc = f"Buy NO@Kalshi ({k.get('no_ask')}) + YES@Poly ({p.get('yes_ask')})"
 
+        depth_net = round(total_profit / max_contracts, 4) if max_contracts else 0.0
         print(f"\n{'*' * 60}")
         print(f"*** ARBITRAGE DETECTED — Leg {leg} ***")
         print(f"*** {desc}")
-        print(f"*** Cost: ${cost:.4f}  |  Fees: ${total_fees:.4f}  |  Net/contract: ${net_profit:.4f}")
+        print(f"*** Top-of-book net: ${net_profit:.4f}  |  Depth-adj net/contract: ${depth_net:.4f}")
         print(f"*** Max fillable: {max_contracts} contracts  |  Total profit: ${total_profit:.4f}")
         print(f"*** {ts_est}")
         print(f"{'*' * 60}\n")
@@ -271,19 +317,16 @@ class ArbitrageDetector:
             round(cost, 4), round(k_fee, 4), round(p_fee, 4),
             round(net_profit, 4), max_contracts, round(total_profit, 4),
         ]
-        self._csv_writer.writerow(row)
-        self._csv_file.flush()
+        self._csv.writerow(row)
 
-        if self._executor is not None and max_contracts > 0:
+        if self._executor is not None:
             from order_executor import ArbitrageOpportunity
             contracts = min(max_contracts, MAX_CONTRACTS_CAP)
             if leg == "A":
-                # Buy YES @ Kalshi, Buy NO @ Poly
                 k_side, k_price = "yes", k["yes_ask"]
                 poly_token = self.poly_client.data[1]  # data[1] = NO (Down) token
                 p_price = p["no_ask"]
             else:
-                # Buy NO @ Kalshi, Buy YES @ Poly
                 k_side, k_price = "no", k["no_ask"]
                 poly_token = self.poly_client.data[0]  # data[0] = YES (Up) token
                 p_price = p["yes_ask"]
@@ -314,7 +357,7 @@ class ArbitrageDetector:
             self.poly_updated_at = 0.0
 
     def close(self):
-        self._csv_file.close()
+        self._csv.close()
 
 
 # ==============================================================================
@@ -388,7 +431,7 @@ def _rotate_market(kalshi_client, poly_client, detector, current_expiry, prefetc
 def main():
     poly_asset_ids, label_map, ordered_labels = _load_poly_config()
 
-    detector = ArbitrageDetector(min_margin=MIN_MARGIN)
+    detector = ArbitrageDetector()
 
     # --- Executor setup (only when EXECUTION_ENABLED = True) ---
     kalshi_rest_client = None
@@ -450,7 +493,7 @@ def main():
     print(f"  Kalshi ticker:  {KALSHI_TICKER}")
     print(f"  Window expires: {current_expiry.strftime('%Y-%m-%d %H:%M ET')}")
     print(f"  Poly assets:    {len(poly_asset_ids)} outcome(s)")
-    print(f"  Min net profit: ${MIN_MARGIN:.4f} (after taker fees)")
+    print(f"  Min profit/contract: ${MIN_PROFIT_DOLLARS:.4f} (depth-adj, after slippage + fees)")
     print(f"  Stale threshold: {STALE_THRESHOLD}s")
     print(f"  Alerts log:     {detector.alerts_file}")
     print()
@@ -496,6 +539,7 @@ def main():
         print("\nStopped by user.")
     finally:
         kalshi_client.close()
+        poly_client.close()
         detector.close()
         if executor:
             executor.close()

@@ -4,6 +4,7 @@ Used by both Kalshi and Polymarket WS clients to maintain local depth.
 """
 
 import threading
+from sortedcontainers import SortedDict
 
 
 class OrderBook:
@@ -11,16 +12,22 @@ class OrderBook:
 
     Thread-safe for concurrent writes (from WS thread) and reads
     (from whichever thread triggers the arbitrage check).
+
+    Uses SortedDict so reads iterate in sorted order — no per-call
+    sort needed. Updates are O(log n); reads are O(n) traversal.
     """
 
     def __init__(self):
-        self._levels = {}  # price_cents -> quantity
+        self._levels = SortedDict()  # price_cents -> quantity
         self._lock = threading.Lock()
 
     def snapshot(self, levels):
         """Full replace. levels: list of (price_cents, qty)."""
         with self._lock:
-            self._levels = {p: q for p, q in levels if q > 0}
+            self._levels.clear()
+            for p, q in levels:
+                if q > 0:
+                    self._levels[p] = q
 
     def update(self, price_cents, delta):
         """Incremental delta (signed int) at a single price level."""
@@ -39,15 +46,9 @@ class OrderBook:
     def get_levels_ascending(self):
         """Return [(price_dollars, qty), ...] sorted cheapest first."""
         with self._lock:
-            return sorted(
-                [(p / 100, q) for p, q in self._levels.items()],
-                key=lambda x: x[0],
-            )
+            return [(p / 100, q) for p, q in self._levels.items()]
 
     def get_levels_descending(self):
         """Return [(price_dollars, qty), ...] sorted most expensive first."""
         with self._lock:
-            return sorted(
-                [(p / 100, q) for p, q in self._levels.items()],
-                key=lambda x: -x[0],
-            )
+            return [(p / 100, q) for p, q in reversed(self._levels.items())]

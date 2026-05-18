@@ -1,7 +1,9 @@
 import asyncio
-import json
 import csv
+import json
 import os
+import queue
+import threading
 import time
 import base64
 from datetime import datetime
@@ -32,6 +34,30 @@ CSV_HEADER = [
 ]
 
 
+class _CsvWriter:
+    """Background CSV writer — enqueues rows and flushes off the hot path."""
+
+    def __init__(self, file, writer):
+        self._file = file
+        self._writer = writer
+        self._q: queue.Queue = queue.Queue()
+        threading.Thread(target=self._run, daemon=True, name="csv-writer").start()
+
+    def writerow(self, row):
+        self._q.put(row)
+
+    def close(self):
+        self._q.put(None)  # sentinel
+
+    def _run(self):
+        while True:
+            row = self._q.get()
+            if row is None:
+                break
+            self._writer.writerow(row)
+            self._file.flush()
+
+
 class KalshiWebSocket:
     """Async WebSocket client for Kalshi real-time market data."""
 
@@ -51,6 +77,7 @@ class KalshiWebSocket:
         self._ws = None         # set during connect() for mid-session operations
         self._cmd_id = 1        # monotonic command ID for subscribe/unsubscribe
         self._loop = None       # event loop ref for cross-thread scheduling
+        self._subscription_sids = []  # sids returned by last subscribe; used for unsubscribe
 
         # Order book depth (maintained via orderbook_delta channel)
         self.yes_bids_book = OrderBook()
@@ -58,14 +85,14 @@ class KalshiWebSocket:
 
         self._private_key = self._load_private_key()
 
-        # CSV setup
         os.makedirs(DATA_DIR, exist_ok=True)
         file_exists = os.path.isfile(DATA_FILE) and os.path.getsize(DATA_FILE) > 0
-        self._csv_file = open(DATA_FILE, "a", newline="")
-        self._csv_writer = csv.writer(self._csv_file)
+        _f = open(DATA_FILE, "a", newline="")
+        _w = csv.writer(_f)
         if not file_exists:
-            self._csv_writer.writerow(CSV_HEADER)
-            self._csv_file.flush()
+            _w.writerow(CSV_HEADER)
+            _f.flush()
+        self._csv = _CsvWriter(_f, _w)
 
     # ---------- auth ----------
 
@@ -173,8 +200,7 @@ class KalshiWebSocket:
             yes_mid,
             no_mid,
         ]
-        self._csv_writer.writerow(row)
-        self._csv_file.flush()
+        self._csv.writerow(row)
 
         yb = prices.get("yes_bid", "?")
         ya = prices.get("yes_ask", "?")
@@ -213,7 +239,7 @@ class KalshiWebSocket:
         if msg_type == "ticker":
             msg = data.get("msg", {})
             ticker = msg.get("market_ticker")
-            if ticker is None:
+            if ticker is None or ticker not in self.tickers:
                 return
 
             prices = self._extract_prices(msg)
@@ -223,6 +249,9 @@ class KalshiWebSocket:
 
         elif msg_type == "orderbook_snapshot":
             msg = data.get("msg", {})
+            ticker = msg.get("market_ticker")
+            if ticker is not None and ticker not in self.tickers:
+                return
             # API now sends yes_dollars_fp/no_dollars_fp: [["price_str", "qty_str"], ...]
             yes_levels = [
                 (round(float(e[0]) * 100), float(e[1]))
@@ -238,6 +267,9 @@ class KalshiWebSocket:
 
         elif msg_type == "orderbook_delta":
             msg = data.get("msg", {})
+            ticker = msg.get("market_ticker")
+            if ticker is not None and ticker not in self.tickers:
+                return
             side = msg.get("side")
             # API now sends price_dollars (str) and delta_fp (str)
             price_str = msg.get("price_dollars")
@@ -249,7 +281,13 @@ class KalshiWebSocket:
                 book.update(price_cents, delta)
 
         elif msg_type == "subscribed":
-            sids = data.get("msg", {}).get("sids", [])
+            msg = data.get("msg", {})
+            # API may return "sid" (int, singular) or "sids" (list) — handle both
+            sid = msg.get("sid")
+            sids = msg.get("sids") or []
+            if sid is not None:
+                sids = [sid]
+            self._subscription_sids.extend(sids)
             print(f"Subscription confirmed (sids: {sids})")
 
         elif msg_type == "error":
@@ -266,6 +304,7 @@ class KalshiWebSocket:
 
         async with websockets.connect(WS_URL, additional_headers=headers) as ws:
             self._ws = ws
+            self._subscription_sids = []  # fresh slate on every (re)connect
 
             self._cmd_id += 1
             await ws.send(json.dumps({
@@ -288,18 +327,29 @@ class KalshiWebSocket:
             print("Warning: Cannot update tickers — no active connection.")
             return
 
+        old = self.tickers
+        # Update self.tickers first so the message filter rejects old-ticker
+        # messages as soon as the event loop resumes after the awaits below.
+        self.tickers = new_tickers
+
+        # Unsubscribe old: use stored sids if available, else fall back to market_tickers
         self._cmd_id += 1
+        if self._subscription_sids:
+            unsub_params = {"sids": self._subscription_sids}
+        else:
+            unsub_params = {"channels": ["ticker", "orderbook_delta"], "market_tickers": old}
         await self._ws.send(json.dumps({
             "id": self._cmd_id,
             "cmd": "unsubscribe",
-            "params": {"channels": ["ticker", "orderbook_delta"], "market_tickers": self.tickers},
+            "params": unsub_params,
         }))
 
-        # Clear stale data for old tickers
-        for t in self.tickers:
+        # Clear stale data for old tickers and reset sids for the new subscription
+        for t in old:
             self.latest_data.pop(t, None)
         self.yes_bids_book.clear()
         self.no_bids_book.clear()
+        self._subscription_sids = []
 
         self._cmd_id += 1
         await self._ws.send(json.dumps({
@@ -308,8 +358,6 @@ class KalshiWebSocket:
             "params": {"channels": ["ticker", "orderbook_delta"], "market_tickers": new_tickers},
         }))
 
-        old = self.tickers
-        self.tickers = new_tickers
         print(f"Kalshi rotation: {old} -> {new_tickers}")
 
     async def run(self):
@@ -337,7 +385,7 @@ class KalshiWebSocket:
             await asyncio.sleep(reconnect_delay)
 
     def close(self):
-        self._csv_file.close()
+        self._csv.close()
 
 
 # ==============================================================================
